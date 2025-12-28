@@ -1,131 +1,123 @@
-
-import numpy as np
-import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
-from datetime import datetime as dt
-from scipy.stats import norm
-from scipy.optimize import brentq
+from ImpliedVolatility import ImpliedVolatility
 
 spy = yf.Ticker("SPY")
-
-# Get the spot price
-spot = spy.history(period="1d")["Close"].iloc[-1]
-print("Spot price:", spot)
-
-# Get the expiries
-expiries = spy.options
-print(expiries[:10])
-
-def BS_call(S, K, T, r, q, sigma):
-    # handle edge cases
-    if T <= 0 or sigma <= 0:
-        return max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
-
-    sqrtT = np.sqrt(T)
-    d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * sqrtT)
-    d2 = d1 - sigma * sqrtT
-    return S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-
-def get_IV(price, S, K, T, r, q):
-    # no-arbitrage bounds for a (non-dividend) European call
-    c_min = max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
-    c_max = S * np.exp(-q * T)
-
-    if not (c_min < price < c_max):
-        return np.nan
-
-    return brentq(
-        lambda x: BS_call(S, K, T, r, q, x) - price,
-        1e-6, 5.0
-    )
-
 r = 0.02 # risk free rate
 q = 0.015  # 1.5% dividend yield (rough but fine)
-today = dt.utcnow().date() # date time today
-all_pts = []
+num_expiries = 100
 
-for expiry in expiries:
-    # get the calls and puts
-    chain = spy.option_chain(expiry)
-    calls = chain.calls
-    puts = chain.puts
+iv = ImpliedVolatility(spy, r, q)
+tt = iv.calculate_implied_volatility(num_expiries)
+iv.plot_surface(n_moneyness=30, n_maturity=30)
 
-    # obtain the mid price
-    calls["mid"] = 0.5 * (calls["bid"] + calls["ask"])
-    puts["mid"] = 0.5 * (puts["bid"] + puts["ask"])
-
-    # time to maturity
-    exp_date = pd.to_datetime(expiry).date()
-    T = (exp_date - today).days / 365.0
-    if T <= 0:
-        continue
-    calls["T"] = T
-
-    # filter out bad prices
-    calls = calls[(calls["bid"] > 0) & (calls["ask"] > 0)]
-    puts = puts[(puts["bid"] > 0) & (puts["ask"] > 0)]
-    # filter out bad moneyness
-    calls["moneyness"] = calls["strike"]/spot
-    calls = calls[(calls["moneyness"] > 0.99) & (calls["moneyness"] < 1.2)]
-    # filter out bad OI
-    calls = calls[(calls["openInterest"] > 0)]
-
-    # compute the implied vol
-    calls["IV"] = calls.apply(
-        lambda row: get_IV(row["mid"], spot, row["strike"], T, r, q),
-        axis=1
-    )
-
-    calls = calls.dropna(subset = ["IV"])
-    all_pts.append(calls[["moneyness", "T", "IV"]])
-pts = pd.concat(all_pts, ignore_index=True)
-
-from scipy.interpolate import griddata
-
-# build a grid
-m_grid = np.linspace(0.95, 1.05, 31)     # moneyness axis
-T_grid = np.linspace(pts["T"].min(), pts["T"].max(), 25)  # maturity axis
-MM, TT = np.meshgrid(m_grid, T_grid)
-
-# interpolate (cubic looks nice, linear is safer)
-IV_grid = griddata(
-    points=(pts["moneyness"].values, pts["T"].values),
-    values=pts["IV"].values,
-    xi=(MM, TT),
-    method="linear"
-)
-
-# fill any holes with nearest-neighbour
-IV_grid_nn = griddata(
-    points=(pts["moneyness"].values, pts["T"].values),
-    values=pts["IV"].values,
-    xi=(MM, TT),
-    method="nearest"
-)
-
-IV_grid = np.where(np.isnan(IV_grid), IV_grid_nn, IV_grid)
-
-
-plt.figure(figsize=(8, 5))
-plt.imshow(
-    IV_grid,
-    origin="lower",
-    aspect="auto",
-    extent=[m_grid.min(), m_grid.max(), T_grid.min(), T_grid.max()]
-)
-plt.colorbar(label="Implied Vol")
-plt.xlabel("Moneyness K/S")
-plt.ylabel("Maturity T (years)")
-plt.title("Implied Volatility Surface (Heatmap)")
-plt.show()
-
+n_moneyness=30
+n_maturity=30
+c_pts = tt
+import numpy as np
+import pandas as pd
+from datetime import date
+from scipy.stats import norm
+from scipy.optimize import brentq
+from scipy.interpolate import griddata, RegularGridInterpolator
+import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-fig = plt.figure(figsize=(10, 6))
-ax = fig.add_subplot(111, projection="3d")
-ax.plot_surface(MM, TT, IV_grid)
-ax.set_xlabel("Moneyness K/S")
-ax.set_ylabel("Maturity T (years)")
-ax.set_zlabel("Implied Vol")
-plt.show()
+
+def interp_and_fill_binned(df, MM, TT, smooth_window=5, min_pts=3, T_bin_width=7 / 365):
+    """
+    Robust surface builder:
+      1) Bin maturities into buckets (e.g., weekly)
+      2) Smooth IV across moneyness within each bucket using rolling mean
+      3) Interpolate on (moneyness, T) grid using linear griddata
+      4) Fill holes with nearest-neighbour
+
+    df must have columns: ["moneyness", "T", "IV"]
+    MM, TT are meshgrids of moneyness and T.
+    """
+    df = df.copy()
+    df = df.dropna(subset=["moneyness", "T", "IV"])
+
+    # Bin maturities into buckets
+    df["T_bin"] = (df["T"] / T_bin_width).round().astype(int)
+
+    # Sort so rolling operates in moneyness order within each maturity bin
+    df = df.sort_values(["T_bin", "moneyness"])
+
+    # Smooth across moneyness inside each T-bin
+    df["IV_smooth"] = (
+        df.groupby("T_bin", group_keys=False)["IV"]
+        .apply(lambda s: s.rolling(window=smooth_window, center=True, min_periods=min_pts).mean())
+    )
+
+    # Use smoothed values where available
+    df["IV_use"] = df["IV_smooth"].fillna(df["IV"])
+
+    # Interpolate (linear)
+    IV_grid = griddata(
+        points=(df["moneyness"].values, df["T"].values),
+        values=df["IV_use"].values,
+        xi=(MM, TT),
+        method="linear"
+    )
+
+    # Fill holes with nearest neighbour
+    IV_grid_nn = griddata(
+        points=(df["moneyness"].values, df["T"].values),
+        values=df["IV_use"].values,
+        xi=(MM, TT),
+        method="nearest"
+    )
+
+    return np.where(np.isnan(IV_grid), IV_grid_nn, IV_grid)
+
+c_pts = c_pts[(c_pts["T"] > 0.05)]
+min_moneyness, max_moneyness =  c_pts["moneyness"].min(),  c_pts["moneyness"].max()
+min_maturity, max_maturity =  c_pts["T"].min(),  c_pts["T"].max()
+
+m_grid = np.linspace(min_moneyness, max_moneyness, n_moneyness)
+T_grid = np.linspace(min_maturity, max_maturity, n_maturity)
+MM, TT = np.meshgrid(m_grid, T_grid)
+# interpolate
+IV_grid = interp_and_fill_binned( c_pts, MM, TT)
+
+interp = RegularGridInterpolator(
+    (T_grid, m_grid),
+    IV_grid,
+    bounds_error=False,
+    fill_value=np.nan
+)
+
+
+def IV(m, T):
+    return float(interp([[T, m]])[0])
+
+with plt.style.context('dark_background'):
+    fig = plt.figure(figsize=(10, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # maturity slices (mask NaNs so plot doesn't break on gaps)
+    for T0 in [30 / 365, 90 / 365]:
+        m_line = np.linspace(m_grid.min(), m_grid.max(), 100)
+        IV_line = np.array([IV(m, T0) for m in m_line])
+        mask = np.isfinite(IV_line)
+        if mask.any():
+            ax.plot(m_line[mask], np.full_like(m_line[mask], T0), IV_line[mask] - 0.005,
+                    color='black', linestyle='--', linewidth=2)
+
+    # moneyness reference lines
+    for m0 in [1.00, 1.03, 1.06]:
+        T_line = np.linspace(T_grid.min(), T_grid.max(), 100)
+        IV_line = np.array([IV(m0, T) for T in T_line])
+        mask = np.isfinite(IV_line)
+        if mask.any():
+            ax.plot(np.full_like(T_line[mask], m0), T_line[mask], IV_line[mask]-0.05,
+                    color='black', linestyle='--', linewidth=2)
+    # draw surface slightly transparent so lines are visible
+    ax.plot_surface(MM, TT, IV_grid, cmap="viridis", linewidth=0, antialiased=False, alpha=0.75)
+
+    ax.set_xlabel("Moneyness K/S")
+    ax.set_ylabel("Maturity T (years)")
+    ax.set_zlabel("Implied Vol")
+    ax.set_title("IV Surface with Parameter Extraction Paths")
+
+    plt.show()
