@@ -1,7 +1,9 @@
 import yfinance as yf
 from ImpliedVolatility import ImpliedVolatility
+from ReadOptionData import get_option_data
 
 spy = yf.Ticker("SPY")
+new_spy = get_option_data("SPY")
 r = 0.02 # risk free rate
 q = 0.015  # 1.5% dividend yield (rough but fine)
 num_expiries = 100

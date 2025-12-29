@@ -37,7 +37,7 @@ def get_option_data(ticker, start_date = None, end_date = None):
     QUERY = """
     SELECT *
     FROM option_chain
-    WHERE act_symbol = $my_symbol$ AND date BETWEEN $my_start$ AND $my_end$
+    WHERE act_symbol = '$my_symbol$' AND date BETWEEN '$my_start$' AND '$my_end$'
     """
     QUERY = QUERY.replace('$my_symbol$', ticker)
     QUERY = QUERY.replace('$my_start$', start_date)
@@ -46,10 +46,8 @@ def get_option_data(ticker, start_date = None, end_date = None):
     # make the connection
     conn = make_connection()
 
+    df = pd.DataFrame()
     if conn.is_connected():
         df = pd.read_sql(QUERY, conn)
         conn.close()
     return df
-
-
-
