@@ -68,7 +68,7 @@ class ImpliedVolatility:
         :return:
         """
         if data is not None:
-            return self._calculate_from_dataframe(num_expiry)
+            return self._calculate_from_dataframe(num_expiry, data)
         else:
             print("No data detected getting from yfinance")
             return self._calculate_from_yfinance(num_expiry)
@@ -125,20 +125,37 @@ class ImpliedVolatility:
         self.c_pts = rs
         return rs
 
-    def _calculate_from_dataframe(self, num_expiry):
-        df = self.ticker.copy()
+    def _calculate_from_dataframe(self, num_expiry, data):
+        def get_spot_series(ticker: str, start_date: str, end_date: str) -> pd.Series:
+            px = yf.download(
+                ticker,
+                start=start_date,
+                end=(pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+                interval="1d",
+                auto_adjust=False,
+                progress=False
+            )
+            if px.empty:
+                raise ValueError(f"No underlying price data returned for {ticker} between {start_date} and {end_date}")
+            # convert index to datetime
+            px.index = pd.to_datetime(px.index)
+            px = pd.Series(px['Close'].values.ravel(), name="spot", index=px.index).dropna()
+            return px
+
+        df = data.copy()
 
         # Filter for calls if column exists
         if 'call_put' in df.columns:
-            df = df[df['option_type'].astype(str).str.lower().isin(['call', 'c'])]
+            df = df[df['call_put'].astype(str).str.lower().isin(['call', 'c'])]
 
         # Ensure datetime
-        df['date'] = pd.to_datetime(df['date'])
-        df['expiration'] = pd.to_datetime(df['expiration'])
+        df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
+        df['expiration'] = pd.to_datetime(df['expiration'], format='%Y-%m-%d')
 
         # Calculate T
         df['T'] = (df['expiration'] - df['date']).dt.days / 365.0
-        df = df[df['T'] > 0]
+        df = df[df['T'] > 10/365] # ultra short maturities
+        df = df.groupby("T").filter(lambda x: len(x) >= 5)
 
         # Limit expiries
         if num_expiry is not None:
@@ -147,23 +164,42 @@ class ImpliedVolatility:
             df = df[df['expiration'].isin(target_expiries)]
 
         # Check for underlying price
-        if 'underlying_price' not in df.columns:
-            if 'spot' in df.columns:
-                df['underlying_price'] = df['spot']
-            else:
-                # If no spot price, we can't calculate moneyness properly.
-                # Assuming it exists as per standard option chain data.
-                raise ValueError("DataFrame must contain 'underlying_price' column")
+        if 'spot' not in df.columns:
+            # get the spot data from yfinance
+            spot_series = get_spot_series(self.ticker, df['date'].min().strftime("%Y-%m-%d"), df['date'].max().strftime("%Y-%m-%d"))
+        else:
+            raise KeyError('spot must be in the coloumns of dataframe')
 
         # Moneyness
-        df['moneyness'] = df['strike'] / df['underlying_price']
+        # Ensure everything is datetime and sorted
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+
+        spot_df = spot_series.rename("spot").to_frame().reset_index()
+        spot_df.columns = ["date", "spot"]
+        spot_df["date"] = pd.to_datetime(spot_df["date"]).dt.normalize()
+        spot_df = spot_df.sort_values("date")
+
+        df = df.sort_values("date")
+
+        # As-of join: closest spot at or before the option date
+        df = pd.merge_asof(
+            df,
+            spot_df,
+            on="date",
+            direction="backward",  # <= this is the key
+            tolerance=pd.Timedelta("7D")  # optional safety
+        )
+
+        df = df.dropna(subset=['spot'])
+
+        df['moneyness'] = df['strike'] / df['spot']
         df = df[(df['moneyness'] > 1.0) & (df['moneyness'] < 1.1)]
 
         # Calculate IV
         if 'bid' in df.columns and 'ask' in df.columns:
             df['mid'] = 0.5 * (df['bid'] + df['ask'])
             df['IV'] = df.apply(
-                lambda row: self._get_IV_call(row['mid'], row['underlying_price'], row['strike'], row['T'], self.r, self.q),
+                lambda row: self._get_IV_call(row['mid'], row['spot'], row['strike'], row['T'], self.r, self.q),
                 axis=1
             )
         elif 'implied_volatility' in df.columns:
