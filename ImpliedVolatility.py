@@ -3,9 +3,9 @@ import pandas as pd
 from datetime import date
 from scipy.stats import norm
 from scipy.optimize import brentq
-from scipy.interpolate import griddata, RegularGridInterpolator
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from Utilities import build_interpolated
 
 class ImpliedVolatility:
     def __init__(self, ticker, r, q):
@@ -14,55 +14,64 @@ class ImpliedVolatility:
         self.q = q
         self.c_pts = None
 
+    def _BS_call(self, S, K, T, r, q, sigma):
+        """
+        Compute from Black-Scholes the option value
+        :param S: spot price
+        :param K: Strike price
+        :param T: Time period to maturity (yrs)
+        :param r: risk-free rate
+        :param q: dividend %
+        :param sigma: volatility
+        :return: Option price
+        """
+        # handle edge cases
+        if T <= 0 or sigma <= 0:
+            return max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
+
+        sqrtT = np.sqrt(T)
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * sqrtT)
+        d2 = d1 - sigma * sqrtT
+        return S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+
+    def _get_IV_call(self, price, S, K, T, r, q):
+        """
+        Compute the implied volatility of a call option
+        :param price: option price
+        :param S: spot
+        :param K: stike
+        :param T: Time period
+        :param r: risk-free rate
+        :param q: dividend rate
+        :return: implied volatility for the option
+        """
+        # no-arbitrage bounds for a (non-dividend) European call
+        c_min = max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
+        c_max = S * np.exp(-q * T)
+
+        if not (c_min < price < c_max):
+            return np.nan
+
+        try:
+            return brentq(
+                lambda x: self._BS_call(S, K, T, r, q, x) - price,
+                1e-6, 5.0
+            )
+        except Exception:
+            return np.nan
+
     def calculate_implied_volatility(self, num_expiry):
         """
         Returns the implied volatility for options
         :param num_expiry:
         :return:
         """
-        def BS_call(S, K, T, r, q, sigma):
-            """
-            Compute from Black-Scholes the option value
-            :param S: spot price
-            :param K: Strike price
-            :param T: Time period to maturity (yrs)
-            :param r: risk-free rate
-            :param q: dividend %
-            :param sigma: volatility
-            :return: Option price
-            """
-            # handle edge cases
-            if T <= 0 or sigma <= 0:
-                return max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
+        if isinstance(self.ticker, pd.DataFrame):
+            return self._calculate_from_dataframe(num_expiry)
+        else:
+            return self._calculate_from_yfinance(num_expiry)
 
-            sqrtT = np.sqrt(T)
-            d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * sqrtT)
-            d2 = d1 - sigma * sqrtT
-            return S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-
-        def get_IV_call(price, S, K, T, r, q):
-            """
-            Compute the implied volatility of a call option
-            :param price: option price
-            :param S: spot
-            :param K: stike
-            :param T: Time period
-            :param r: risk-free rate
-            :param q: dividend rate
-            :return: implied volatility for the option
-            """
-            # no-arbitrage bounds for a (non-dividend) European call
-            c_min = max(S * np.exp(-q * T) - K * np.exp(-r * T), 0.0)
-            c_max = S * np.exp(-q * T)
-
-            if not (c_min < price < c_max):
-                return np.nan
-
-            return brentq(
-                lambda x: BS_call(S, K, T, r, q, x) - price,
-                1e-6, 5.0
-            )
-
+    def _calculate_from_yfinance(self, num_expiry):
         # Get the expiries
         expiries = self.ticker.options
         expiries = expiries[:num_expiry]
@@ -98,7 +107,7 @@ class ImpliedVolatility:
 
             # compute the implied vol
             calls["IV"] = calls.apply(
-                lambda row: get_IV_call(row["mid"], spot, row["strike"], T, self.r, self.q),
+                lambda row: self._get_IV_call(row["mid"], spot, row["strike"], T, self.r, self.q),
                 axis=1
             )
 
@@ -108,6 +117,56 @@ class ImpliedVolatility:
         self.c_pts = pd.concat(call_pts, ignore_index=True)
         return self.c_pts
 
+    def _calculate_from_dataframe(self, num_expiry):
+        df = self.ticker.copy()
+
+        # Filter for calls if column exists
+        if 'call_put' in df.columns:
+            df = df[df['option_type'].astype(str).str.lower().isin(['call', 'c'])]
+
+        # Ensure datetime
+        df['date'] = pd.to_datetime(df['date'])
+        df['expiration'] = pd.to_datetime(df['expiration'])
+
+        # Calculate T
+        df['T'] = (df['expiration'] - df['date']).dt.days / 365.0
+        df = df[df['T'] > 0]
+
+        # Limit expiries
+        if num_expiry is not None:
+            unique_expiries = sorted(df['expiration'].unique())
+            target_expiries = unique_expiries[:num_expiry]
+            df = df[df['expiration'].isin(target_expiries)]
+
+        # Check for underlying price
+        if 'underlying_price' not in df.columns:
+            if 'spot' in df.columns:
+                df['underlying_price'] = df['spot']
+            else:
+                # If no spot price, we can't calculate moneyness properly.
+                # Assuming it exists as per standard option chain data.
+                raise ValueError("DataFrame must contain 'underlying_price' column")
+
+        # Moneyness
+        df['moneyness'] = df['strike'] / df['underlying_price']
+        df = df[(df['moneyness'] > 1.0) & (df['moneyness'] < 1.1)]
+
+        # Calculate IV
+        if 'bid' in df.columns and 'ask' in df.columns:
+            df['mid'] = 0.5 * (df['bid'] + df['ask'])
+            df['IV'] = df.apply(
+                lambda row: self._get_IV_call(row['mid'], row['underlying_price'], row['strike'], row['T'], self.r, self.q),
+                axis=1
+            )
+        elif 'implied_volatility' in df.columns:
+            df['IV'] = df['implied_volatility']
+        else:
+             raise ValueError("DataFrame must contain 'bid'/'ask' or 'implied_volatility'")
+
+        df = df.dropna(subset=['IV'])
+        self.c_pts = df[['moneyness', 'T', 'IV']]
+        return self.c_pts
+
     def plot_surface(self, n_moneyness, n_maturity):
         """
         Plots the implied volatility surface
@@ -115,53 +174,6 @@ class ImpliedVolatility:
         :param n_maturity: number of maturity points
         :return:
         """
-        def interp_and_fill_binned( df, MM, TT, smooth_window=5, min_pts=3, T_bin_width=7 / 365 ):
-            """
-            Robust surface builder:
-              1) Bin maturities into buckets (e.g., weekly)
-              2) Smooth IV across moneyness within each bucket using rolling mean
-              3) Interpolate on (moneyness, T) grid using linear griddata
-              4) Fill holes with nearest-neighbour
-
-            df must have columns: ["moneyness", "T", "IV"]
-            MM, TT are meshgrids of moneyness and T.
-            """
-            df = df.copy()
-            df = df.dropna(subset=["moneyness", "T", "IV"])
-
-            # Bin maturities into buckets
-            df["T_bin"] = (df["T"] / T_bin_width).round().astype(int)
-
-            # Sort so rolling operates in moneyness order within each maturity bin
-            df = df.sort_values(["T_bin", "moneyness"])
-
-            # Smooth across moneyness inside each T-bin
-            df["IV_smooth"] = (
-                df.groupby("T_bin", group_keys=False)["IV"]
-                .apply(lambda s: s.rolling(window=smooth_window, center=True, min_periods=min_pts).mean())
-            )
-
-            # Use smoothed values where available
-            df["IV_use"] = df["IV_smooth"].fillna(df["IV"])
-
-            # Interpolate (linear)
-            IV_grid = griddata(
-                points=(df["moneyness"].values, df["T"].values),
-                values=df["IV_use"].values,
-                xi=(MM, TT),
-                method="linear"
-            )
-
-            # Fill holes with nearest neighbour
-            IV_grid_nn = griddata(
-                points=(df["moneyness"].values, df["T"].values),
-                values=df["IV_use"].values,
-                xi=(MM, TT),
-                method="nearest"
-            )
-
-            return np.where(np.isnan(IV_grid), IV_grid_nn, IV_grid)
-
         min_moneyness, max_moneyness = self.c_pts["moneyness"].min(), self.c_pts["moneyness"].max()
         min_maturity, max_maturity = self.c_pts["T"].min() + 0.07, self.c_pts["T"].max()
 
@@ -169,17 +181,7 @@ class ImpliedVolatility:
         T_grid = np.linspace(min_maturity, max_maturity, n_maturity)
         MM, TT = np.meshgrid(m_grid, T_grid)
         # interpolate
-        IV_grid = interp_and_fill_binned(self.c_pts, MM, TT)
-
-        interp = RegularGridInterpolator(
-            (T_grid, m_grid),
-            IV_grid,
-            bounds_error=False,
-            fill_value=np.nan
-        )
-
-        def IV(m, T):
-            return float(interp([[T, m]])[0])
+        IV_grid = build_interpolated(self.c_pts, MM, TT)
 
         with plt.style.context('dark_background'):
             fig = plt.figure(figsize=(10, 6))
@@ -194,4 +196,3 @@ class ImpliedVolatility:
             ax.set_title("Implied Volatility Surface (Calls only)")
             plt.show()
         return
-
