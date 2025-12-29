@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import yfinance as yf
 from datetime import date
 from scipy.stats import norm
 from scipy.optimize import brentq
@@ -60,30 +61,35 @@ class ImpliedVolatility:
         except Exception:
             return np.nan
 
-    def calculate_implied_volatility(self, num_expiry):
+    def calculate_implied_volatility(self, num_expiry, data=None):
         """
         Returns the implied volatility for options
         :param num_expiry:
         :return:
         """
-        if isinstance(self.ticker, pd.DataFrame):
+        if data is not None:
             return self._calculate_from_dataframe(num_expiry)
         else:
+            print("No data detected getting from yfinance")
             return self._calculate_from_yfinance(num_expiry)
 
     def _calculate_from_yfinance(self, num_expiry):
+        my_ticker = yf.Ticker(self.ticker)
         # Get the expiries
-        expiries = self.ticker.options
+        expiries = my_ticker.options
+        if not expiries:
+            return pd.DataFrame()
+
         expiries = expiries[:num_expiry]
 
         # Get spot rate
-        spot = self.ticker.history(period="1d")["Close"].iloc[-1]
+        spot = my_ticker.history(period="1d")["Close"].iloc[-1]
 
         call_pts = []
         today = date.today()
         for expiry in expiries:
             # get the calls
-            chain = self.ticker.option_chain(expiry)
+            chain = my_ticker.option_chain(expiry)
             calls = chain.calls.copy()
 
             # time to maturity
@@ -100,7 +106,8 @@ class ImpliedVolatility:
 
             # filter out bad moneyness
             calls["moneyness"] = calls["strike"] / spot
-            calls = calls[(calls["moneyness"] > 1.0) & (calls["moneyness"] < 1.1)]
+            # Widen the filter to capture more data
+            calls = calls[(calls["moneyness"] > 1.0) & (calls["moneyness"] < 1.20)]
 
             # filter out bad OI
             calls = calls[(calls["openInterest"] > 0)]
@@ -114,8 +121,9 @@ class ImpliedVolatility:
             calls = calls.dropna(subset=["IV"])
             call_pts.append(calls[["moneyness", "T", "IV"]])
 
-        self.c_pts = pd.concat(call_pts, ignore_index=True)
-        return self.c_pts
+        rs = pd.concat(call_pts, ignore_index=True)
+        self.c_pts = rs
+        return rs
 
     def _calculate_from_dataframe(self, num_expiry):
         df = self.ticker.copy()
