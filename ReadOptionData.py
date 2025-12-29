@@ -1,3 +1,7 @@
+from datetime import date
+import pandas as pd
+import mysql.connector
+
 def make_connection():
     """
     Make a connection to the database
