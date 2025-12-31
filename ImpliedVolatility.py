@@ -231,3 +231,19 @@ class ImpliedVolatility:
             ax.set_title("Implied Volatility Surface (Calls only)")
             plt.show()
         return
+
+    def plot_heatmap(self, IV_grid, T_mesh, M_mesh):
+        """
+        Plots the implied volatility surface as a heatmap
+        """
+        with plt.style.context('dark_background'):
+            fig, ax = plt.subplots(figsize=(10, 6))
+            # Use contourf for a smooth heatmap representation
+            cp = ax.contourf(T_mesh, M_mesh, IV_grid, levels=100, cmap='viridis')
+            cbar = fig.colorbar(cp)
+            cbar.set_label('Implied Volatility')
+
+            ax.set_xlabel("Maturity T (years)")
+            ax.set_ylabel("Moneyness K/S")
+            ax.set_title("Implied Volatility Heatmap")
+            plt.show()
