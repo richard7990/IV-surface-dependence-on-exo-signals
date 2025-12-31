@@ -6,7 +6,6 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from Utilities import build_interpolated
 
 class ImpliedVolatility:
     def __init__(self, ticker, r, q):
@@ -211,26 +210,18 @@ class ImpliedVolatility:
         self.c_pts = df[['moneyness', 'T', 'IV']]
         return self.c_pts
 
-    def plot_surface(self, n_moneyness, n_maturity):
+    def plot_surface(self, IV_grid, T_mesh, M_mesh):
         """
         Plots the implied volatility surface
         :param n_moneyness: number of moneyness points
         :param n_maturity: number of maturity points
         :return:
         """
-        min_moneyness, max_moneyness = self.c_pts["moneyness"].min(), self.c_pts["moneyness"].max()
-        min_maturity, max_maturity = self.c_pts["T"].min() + 0.07, self.c_pts["T"].max()
-
-        m_grid = np.linspace(min_moneyness, max_moneyness, n_moneyness)
-        T_grid = np.linspace(min_maturity, max_maturity, n_maturity)
-        MM, TT = np.meshgrid(m_grid, T_grid)
-        # interpolate
-        IV_grid = build_interpolated(self.c_pts, MM, TT)
 
         with plt.style.context('dark_background'):
             fig = plt.figure(figsize=(10, 6))
             ax = fig.add_subplot(111, projection="3d")
-            ax.plot_surface(TT, MM, IV_grid, cmap="viridis")
+            ax.plot_surface(T_mesh, M_mesh, IV_grid, cmap="viridis")
             ax.set_ylabel("Moneyness K/S")
             ax.set_xlabel("Maturity T (years)")
             # invert y and z by reversing current limits
