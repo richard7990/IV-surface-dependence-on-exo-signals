@@ -6,6 +6,15 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import PchipInterpolator, UnivariateSpline
 
+
+def build_mesh(c_pts, meta, n_moneyness=100, n_maturity=100):
+    m_min = meta["x_min"].max()
+    m_max = meta["x_max"].min()
+    m_grid = np.linspace(m_min, m_max, n_moneyness)
+    T_grid = np.linspace(c_pts["T"].min() + 0.05, c_pts["T"].max(), n_maturity)
+    return m_grid, T_grid
+
+
 def interpolated_spline(
     df: pd.DataFrame,
     T_bin_width: float = 7 / 365,
@@ -42,6 +51,11 @@ def interpolated_spline(
     work = df.loc[:, ["moneyness", "T", "IV"]].copy()
     work = work.dropna(subset=["moneyness", "T", "IV"])
 
+    # Round Moneyness to nearest 1% to merge liquid/illiquid strikes
+    work["moneyness"] = (work["moneyness"] * 100).round() / 100
+    # Now group by this rounded moneyness and take the MAX vol (assuming peaks are real liquidity)
+    work = work.groupby(["T", "moneyness"], as_index=False)["IV"].max()
+
     # Bucket maturities (weekly by default)
     work["T_bin"] = np.rint(work["T"].to_numpy() / T_bin_width).astype(int)
 
@@ -74,6 +88,19 @@ def interpolated_spline(
         if x.size < min_points:
             continue
 
+        if len(y) > 0:
+            # 1. Separate the curve into left (ITM) and right (OTM) of ATM
+            atm_mask = x >= 1.0
+
+            # 2. Only enforce on the right side (OTM Calls)
+            y_right = y[atm_mask]
+
+            # 3. Apply "minimum so far" filter (accumulated minimum)
+            # If y drops to 0.33, it can never go back up to 0.34 later.
+            if len(y_right) > 0:
+                y_monotonic = np.minimum.accumulate(y_right)
+                y[atm_mask] = y_monotonic
+
         # rolling median smoothing (works best after sorting)
         if smooth_window > 1:
             y = (
@@ -97,6 +124,9 @@ def interpolated_spline(
             "x_min": float(x.min()),
             "x_max": float(x.max()),
         })
+
+    if not meta_rows:
+        return splines, pd.DataFrame(columns=["T_bin", "T_mid", "n", "x_min", "x_max"])
 
     meta_df = pd.DataFrame(meta_rows).sort_values("T_mid").reset_index(drop=True)
     return splines, meta_df
@@ -152,14 +182,27 @@ def eval_splined_surface(
     IV_slices = np.full((T_sorted.size, m_grid.size), np.nan, dtype=float)
 
     # --- 1) evaluate each maturity slice within its support
-    for i, row in meta.iterrows():
-        T_mid = float(row["T_mid"])
-        x_min = float(row["x_min"])
-        x_max = float(row["x_max"])
+    # Evaluate each maturity slice only within its support
+    for i, row in enumerate(meta.itertuples(index=False)):
+        T_mid = float(row.T_mid)  # Ensure float
 
-        inside = (m_grid >= x_min) & (m_grid <= x_max)
-        if inside.any():
-            IV_slices[i, inside] = splines[T_mid](m_grid[inside])
+        # --- FIX: Safety Lookup ---
+        if T_mid not in splines:
+            # Try finding the closest key if exact match fails (float error)
+            keys = np.array(list(splines.keys()))
+            if len(keys) > 0:
+                nearest = keys[np.argmin(np.abs(keys - T_mid))]
+                if abs(nearest - T_mid) < 1e-9:  # Tolerance
+                    T_mid = nearest
+                else:
+                    continue  # Should not happen if filtered correctly
+
+        x_min = float(row.x_min)
+        x_max = float(row.x_max)
+
+        mask = (m_grid >= x_min) & (m_grid <= x_max)
+        if mask.any():
+            IV_slices[i, mask] = splines[T_mid](m_grid[mask])
 
     # --- 2) interpolate across maturity for each m, ignoring NaNs
     IV_grid = np.full((T_grid.size, m_grid.size), np.nan, dtype=float)

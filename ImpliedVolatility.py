@@ -207,7 +207,7 @@ class ImpliedVolatility:
              raise ValueError("DataFrame must contain 'bid'/'ask' or 'implied_volatility'")
 
         df = df.dropna(subset=['IV'])
-        self.c_pts = df[['moneyness', 'T', 'IV']]
+        self.c_pts = df[['date', 'expiration','moneyness', 'T', 'IV']]
         return self.c_pts
 
     def plot_surface(self, IV_grid, T_mesh, M_mesh):
