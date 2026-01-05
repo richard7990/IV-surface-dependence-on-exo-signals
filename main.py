@@ -3,13 +3,12 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from scipy.stats import alpha
-
 from ImpliedVolatility import ImpliedVolatility
 from ReadOptionData import get_option_data
-from Utilities import interpolated_spline, eval_splined_surface, build_mesh, build_interpolated
+from Utilities import interpolated_spline, eval_splined_surface, build_mesh
 import matplotlib.pyplot as plt
-from SurfaceFeatures import get_surface_features
 from DailyPipeline import ts_surface_features
+from ExogenousSignals import get_exo_df
 
 spy = "SPY"
 #new_spy = get_option_data("SPY")
@@ -35,15 +34,25 @@ iv.plot_surface(IV_grid, TT, MM)
 iv.plot_heatmap(IV_grid, TT, MM)
 
 maturity_slices = [30/365, 45/365, 60/365]
-my_features = get_surface_features(IV_grid, m_grid, T_grid, maturity_slices)
 
-ts_features = ts_surface_features(c_pts, maturity_slices, visual=True)
+# Get time series of IV surface features
+ts_features = ts_surface_features(c_pts, maturity_slices, visual=False)
 
-# Assuming 'ts_results' is your final DataFrame from the previous step
+# Get time series of exogenous signals
+start_date = ts_features['date'].min()
+end_date = ts_features['date'].max()
+exo_df = get_exo_df(start_date=start_date, end_date=end_date)
 
-plt.figure(figsize=(12, 6))
-plt.plot(ts_features['date'], ts_features['level'], label='30-Day ATM Vol')
-plt.title("Evolution of Volatility Level (2019)")
-plt.ylabel("Implied Vol")
-plt.legend()
-plt.show()
+# Generate the X values for the regression initially start with 30D maturity
+X = ts_features.copy()
+target_maturity = 31 # or 31, depending on your slice input
+X = X[X['maturity_days'] == 31]
+
+# Calculate Weekly Changes for IV surface
+X['d_lvl'] = X['level'].shift(1).diff()
+X['d_skew'] = X['skew'].shift(1).diff()
+X['d_curv'] = X['curvature'].shift(1).diff()
+X = X.drop(columns = ['level', 'skew', 'curvature', 'maturity_days'])
+
+# The outputs will be the level of the IV surface as an initial baseline
+Y = ts_features[['level']]
