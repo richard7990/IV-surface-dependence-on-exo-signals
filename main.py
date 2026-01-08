@@ -44,15 +44,86 @@ end_date = ts_features['date'].max()
 exo_df = get_exo_df(start_date=start_date, end_date=end_date)
 
 # Generate the X values for the regression initially start with 30D maturity
-X = ts_features.copy()
+Y = ts_features.copy()
 target_maturity = 31 # or 31, depending on your slice input
-X = X[X['maturity_days'] == 31]
+Y =  Y[Y['maturity_days'] == 31]
 
-# Calculate Weekly Changes for IV surface
-X['d_lvl'] = X['level'].shift(1).diff()
-X['d_skew'] = X['skew'].shift(1).diff()
-X['d_curv'] = X['curvature'].shift(1).diff()
-X = X.drop(columns = ['level', 'skew', 'curvature', 'maturity_days'])
+Y = Y.set_index('date').sort_index()
+Y['d_lvl'] = Y['level'].diff()
 
-# The outputs will be the level of the IV surface as an initial baseline
-Y = ts_features[['level']]
+X = pd.DataFrame()
+# resample to weekly
+X_weekly = exo_df.copy().ffill()
+X_weekly = X_weekly.reindex(Y.index)
+# difference
+X['dy10'] = X_weekly['yld_10Y'].diff()
+X['dcs'] = X_weekly['credit_spread'].diff()
+X['d10y2y'] = X_weekly['diff_10Y_2Y'].diff()
+# implement market asymmetry (panic fear)
+X['neg_rtn'] = np.where(X_weekly['rtn'] < 0, X_weekly['rtn'], 0)
+X['pos_rtn'] = np.where(X_weekly['rtn'] > 0, X_weekly['rtn'], 0)
+
+
+Y.index = pd.to_datetime(Y.index).normalize().tz_localize(None)
+X.index = pd.to_datetime(X.index).normalize().tz_localize(None)
+regression_df = Y[['d_lvl']].join(X, how='inner')
+regression_df = regression_df.dropna()
+
+# 4. Run Regression
+target = regression_df['d_lvl']
+features = regression_df[['dy10', 'dcs', 'd10y2y', 'neg_rtn', 'pos_rtn']]
+
+import statsmodels.api as sm
+
+features = sm.add_constant(features)
+model = sm.OLS(target, features)
+results = model.fit()
+
+print(results.summary())
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+
+
+# Assuming 'regression_df' is your final dataframe with 'd_lvl' and 'drtn' (or 'spy_return')
+# Make sure to use the exact column names from your dataframe
+df = regression_df.copy()
+df['d_rtn'] = df['neg_rtn'] + df['pos_rtn']
+# 1. Setup the Plot
+plt.figure(figsize=(10, 6))
+plt.title("The 'Hockey Stick' of Volatility: Asymmetric Response to Returns", fontsize=14)
+plt.axvline(0, color='black', linestyle='--', alpha=0.3) # The Zero Line
+plt.axhline(0, color='black', linestyle='--', alpha=0.3)
+
+# 2. Plot the Points (Color-coded by Direction)
+# Red for Down Moves (Panic), Green for Up Moves (Calm)
+colors = ['red' if x < 0 else 'blue' for x in df['d_rtn']]
+plt.scatter(df['d_rtn'], df['d_lvl'], c=colors, alpha=0.6, s=50, edgecolors='k', label='Weekly Observations')
+
+# 3. Fit and Plot the "Broken Arrow" Trendlines
+# Negative Side (The Panic Slope)
+neg_data = df[df['d_rtn'] < 0]
+if len(neg_data) > 1:
+    m_neg, b_neg = np.polyfit(neg_data['d_rtn'], neg_data['d_lvl'], 1)
+    # Create line points
+    x_neg = np.linspace(df['d_rtn'].min(), 0, 100)
+    plt.plot(x_neg, m_neg * x_neg + b_neg, color='red', linewidth=3, label=f'Crash Sensitivity (Slope: {m_neg:.2f})')
+
+# Positive Side (The Indifference Slope)
+pos_data = df[df['d_rtn'] >= 0]
+if len(pos_data) > 1:
+    m_pos, b_pos = np.polyfit(pos_data['d_rtn'], pos_data['d_lvl'], 1)
+    # Create line points
+    x_pos = np.linspace(0, df['d_rtn'].max(), 100)
+    plt.plot(x_pos, m_pos * x_pos + b_pos, color='blue', linewidth=3, label=f'Rally Sensitivity (Slope: {m_pos:.2f})')
+
+# 4. Final Polish
+plt.xlabel("Weekly SPY Return", fontsize=12)
+plt.ylabel("Change in 30-Day Volatility (Level)", fontsize=12)
+plt.legend(loc='lower left', frameon=True)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+
+plt.show()

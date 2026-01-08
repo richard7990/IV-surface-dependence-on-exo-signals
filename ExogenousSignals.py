@@ -1,4 +1,6 @@
 import os
+
+import numpy as np
 import yfinance as yf
 import pandas as pd
 import datetime
@@ -27,9 +29,14 @@ def get_exo_df(start_date, end_date):
     ten_year_bonds = yf.Ticker("^TNX")
     yld_10Y = ten_year_bonds.history(start=start_date, end=end_date).Close.tz_localize(None)
 
+    # get the return of spy
+    spy_price = yf.Ticker("SPY")
+    spy_price = spy_price.history(start=start_date, end=end_date).Close.tz_localize(None)
+    spy_rtn = np.log(spy_price / spy_price.shift(1))
+
     # build output
-    rs = pd.concat([rs, credit_spread, diff_10Y_2Y, yld_10Y], axis=1, join='outer')
-    rs.columns = ['credit_spread', 'diff_10Y_2Y', 'yld_10Y']
+    rs = pd.concat([rs, credit_spread, diff_10Y_2Y, yld_10Y, spy_rtn], axis=1, join='outer')
+    rs.columns = ['credit_spread', 'diff_10Y_2Y', 'yld_10Y', 'rtn']
     rs = rs.ffill()
     rs.index.name = 'date'
     return rs
