@@ -7,8 +7,8 @@ from ImpliedVolatility import ImpliedVolatility
 from ReadOptionData import get_option_data
 from Utilities import interpolated_spline, eval_splined_surface, build_mesh
 import matplotlib.pyplot as plt
-from DailyPipeline import ts_surface_features
 from ExogenousSignals import get_exo_df
+from SurfaceFeatures import ts_surface_features
 
 spy = "SPY"
 #new_spy = get_option_data("SPY")
@@ -42,6 +42,10 @@ ts_features = ts_surface_features(c_pts, maturity_slices, visual=False)
 start_date = ts_features['date'].min()
 end_date = ts_features['date'].max()
 exo_df = get_exo_df(start_date=start_date, end_date=end_date)
+
+
+
+
 
 # Generate the X values for the regression initially start with 30D maturity
 Y = ts_features.copy()
@@ -80,50 +84,3 @@ model = sm.OLS(target, features)
 results = model.fit()
 
 print(results.summary())
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-
-
-
-# Assuming 'regression_df' is your final dataframe with 'd_lvl' and 'drtn' (or 'spy_return')
-# Make sure to use the exact column names from your dataframe
-df = regression_df.copy()
-df['d_rtn'] = df['neg_rtn'] + df['pos_rtn']
-# 1. Setup the Plot
-plt.figure(figsize=(10, 6))
-plt.title("The 'Hockey Stick' of Volatility: Asymmetric Response to Returns", fontsize=14)
-plt.axvline(0, color='black', linestyle='--', alpha=0.3) # The Zero Line
-plt.axhline(0, color='black', linestyle='--', alpha=0.3)
-
-# 2. Plot the Points (Color-coded by Direction)
-# Red for Down Moves (Panic), Green for Up Moves (Calm)
-colors = ['red' if x < 0 else 'blue' for x in df['d_rtn']]
-plt.scatter(df['d_rtn'], df['d_lvl'], c=colors, alpha=0.6, s=50, edgecolors='k', label='Weekly Observations')
-
-# 3. Fit and Plot the "Broken Arrow" Trendlines
-# Negative Side (The Panic Slope)
-neg_data = df[df['d_rtn'] < 0]
-if len(neg_data) > 1:
-    m_neg, b_neg = np.polyfit(neg_data['d_rtn'], neg_data['d_lvl'], 1)
-    # Create line points
-    x_neg = np.linspace(df['d_rtn'].min(), 0, 100)
-    plt.plot(x_neg, m_neg * x_neg + b_neg, color='red', linewidth=3, label=f'Crash Sensitivity (Slope: {m_neg:.2f})')
-
-# Positive Side (The Indifference Slope)
-pos_data = df[df['d_rtn'] >= 0]
-if len(pos_data) > 1:
-    m_pos, b_pos = np.polyfit(pos_data['d_rtn'], pos_data['d_lvl'], 1)
-    # Create line points
-    x_pos = np.linspace(0, df['d_rtn'].max(), 100)
-    plt.plot(x_pos, m_pos * x_pos + b_pos, color='blue', linewidth=3, label=f'Rally Sensitivity (Slope: {m_pos:.2f})')
-
-# 4. Final Polish
-plt.xlabel("Weekly SPY Return", fontsize=12)
-plt.ylabel("Change in 30-Day Volatility (Level)", fontsize=12)
-plt.legend(loc='lower left', frameon=True)
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-
-plt.show()

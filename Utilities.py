@@ -237,3 +237,30 @@ def eval_splined_surface(
     IV_grid = np.clip(IV_grid, lo, hi)
 
     return IV_grid, T_sorted, IV_slices
+
+
+def OLS_regression(ts_features, exo_df, target_maturity = 31, label_columns = None, feature_columns = None)
+    labels = ts_features.copy()
+    features = exo_df.copy()
+
+    if label_columns is None:
+        label_columns = labels.columns
+    if any(col not in labels.columns for col in label_columns):
+        print('Possible columns', labels.columns)
+        print('Requested columns', label_columns)
+        raise ValueError("Some label_columns are missing from labels")
+
+    if feature_columns is None:
+        feature_columns = features.columns
+    if any(col not in features.columns for col in feature_columns):
+        print('Possible columns', features.columns)
+        print('Requested columns', features)
+        raise ValueError("Some feature_columns are missing from labels")
+
+    # filter on the target maturity
+    labels = labels[labels == target_maturity]
+    labels = labels.set('index').sort_index()
+    # perform label differencing
+    for col in labels.columns
+        new_col =
+
