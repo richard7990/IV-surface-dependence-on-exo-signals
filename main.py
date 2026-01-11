@@ -3,9 +3,11 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from scipy.stats import alpha
+from statsmodels.graphics.correlation import plot_corr_grid
+
 from ImpliedVolatility import ImpliedVolatility
 from ReadOptionData import get_option_data
-from Utilities import interpolated_spline, eval_splined_surface, build_mesh
+from Utilities import interpolated_spline, eval_splined_surface, build_mesh, OLS_regression, snap_maturities_to_grid
 import matplotlib.pyplot as plt
 from ExogenousSignals import get_exo_df
 from SurfaceFeatures import ts_surface_features
@@ -44,43 +46,66 @@ end_date = ts_features['date'].max()
 exo_df = get_exo_df(start_date=start_date, end_date=end_date)
 
 
+label_columns = 'level'
+feature_columns = None
 
+# 1. Setup
+maturity_dates = [30, 45, 60]
+parameters = ['level', 'skew', 'curvature']
+tolerances = {30: 5, 45: 1, 60: 7}  # Your "Hybrid" Strategy
 
+# Dictionary to hold all results
+full_report_data = []
 
-# Generate the X values for the regression initially start with 30D maturity
-Y = ts_features.copy()
-target_maturity = 31 # or 31, depending on your slice input
-Y =  Y[Y['maturity_days'] == 31]
+# 2. The Master Loop
+for param in parameters:
+    print(f"--- ANALYZING {param.upper()} ---")
 
-Y = Y.set_index('date').sort_index()
-Y['d_lvl'] = Y['level'].diff()
+    for target in maturity_dates:
+        # A. Snap to grid (using hybrid tolerance)
+        # We re-run this inside simply to be safe/explicit for each iteration
+        ts_clean = snap_maturities_to_grid(ts_features, tolerances)
 
-X = pd.DataFrame()
-# resample to weekly
-X_weekly = exo_df.copy().ffill()
-X_weekly = X_weekly.reindex(Y.index)
-# difference
-X['dy10'] = X_weekly['yld_10Y'].diff()
-X['dcs'] = X_weekly['credit_spread'].diff()
-X['d10y2y'] = X_weekly['diff_10Y_2Y'].diff()
-# implement market asymmetry (panic fear)
-X['neg_rtn'] = np.where(X_weekly['rtn'] < 0, X_weekly['rtn'], 0)
-X['pos_rtn'] = np.where(X_weekly['rtn'] > 0, X_weekly['rtn'], 0)
+        # B. Run Regression
+        # Note: 'target_label' argument allows switching between level/skew/curv
+        results = OLS_regression(
+            ts_clean,
+            exo_df,
+            target_maturity=target,
+            target_label=param
+        )
 
+        # C. Extract Data for DataFrame
+        # We store it in a row-based format first, then pivot later
+        model_r2 = results.rsquared
+        n_obs = results.nobs
 
-Y.index = pd.to_datetime(Y.index).normalize().tz_localize(None)
-X.index = pd.to_datetime(X.index).normalize().tz_localize(None)
-regression_df = Y[['d_lvl']].join(X, how='inner')
-regression_df = regression_df.dropna()
+        for var in results.params.index:
+            coef = results.params[var]
+            pval = results.pvalues[var]
 
-# 4. Run Regression
-target = regression_df['d_lvl']
-features = regression_df[['dy10', 'dcs', 'd10y2y', 'neg_rtn', 'pos_rtn']]
+            # Determine significance stars
+            stars = ""
+            if pval < 0.01:
+                stars = "***"
+            elif pval < 0.05:
+                stars = "**"
+            elif pval < 0.10:
+                stars = "*"
 
-import statsmodels.api as sm
+            full_report_data.append({
+                'Parameter': param,
+                'Maturity': f"{target}D",
+                'Variable': var,
+                'Coefficient': f"{coef:.4f}{stars}",
+                'R2': model_r2,
+                'N': int(n_obs),
+                'Raw_PVal': pval  # Keep raw for sorting/checking if needed
+            })
 
-features = sm.add_constant(features)
-model = sm.OLS(target, features)
-results = model.fit()
+# 3. Create the Master DataFrame
+df_report = pd.DataFrame(full_report_data)
+print(df_report)
 
-print(results.summary())
+#################################################
+## DIAGNOSIS

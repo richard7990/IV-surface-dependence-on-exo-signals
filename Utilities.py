@@ -1,10 +1,9 @@
 from __future__ import annotations
-
 from typing import Dict, Tuple, Optional
-
 import numpy as np
 import pandas as pd
 from scipy.interpolate import PchipInterpolator, UnivariateSpline
+import statsmodels.api as sm
 
 
 def build_mesh(c_pts, meta, n_moneyness=100, n_maturity=100):
@@ -239,28 +238,81 @@ def eval_splined_surface(
     return IV_grid, T_sorted, IV_slices
 
 
-def OLS_regression(ts_features, exo_df, target_maturity = 31, label_columns = None, feature_columns = None)
-    labels = ts_features.copy()
+def OLS_regression(ts_features, exo_df, target_maturity = 30, target_label = None, feature_columns = None):
+    labels = ts_features[ts_features['maturity_days'] == target_maturity].copy()
+    # filter on the target maturity
+    labels = labels.set_index('date').sort_index()
+    y = labels[target_label].diff().dropna()
+    y.name = f"d_{target_label}"
+
     features = exo_df.copy()
-
-    if label_columns is None:
-        label_columns = labels.columns
-    if any(col not in labels.columns for col in label_columns):
-        print('Possible columns', labels.columns)
-        print('Requested columns', label_columns)
-        raise ValueError("Some label_columns are missing from labels")
-
     if feature_columns is None:
         feature_columns = features.columns
-    if any(col not in features.columns for col in feature_columns):
-        print('Possible columns', features.columns)
-        print('Requested columns', features)
-        raise ValueError("Some feature_columns are missing from labels")
 
-    # filter on the target maturity
-    labels = labels[labels == target_maturity]
-    labels = labels.set('index').sort_index()
-    # perform label differencing
-    for col in labels.columns
-        new_col =
+    # Normalize index immediately
+    features.index = pd.to_datetime(features.index).normalize()
+    # Forward fill daily signals to handle weekends/holidays before alignment
+    features = features.ffill()
+
+    # Select only the dates that match our Volatility observations
+    features_aligned = features.reindex(y.index)
+
+    x = pd.DataFrame(index=y.index)
+
+    for col in feature_columns:
+        # SPECIAL HANDLING: Do not diff Returns, only Macro levels
+        if col == 'rtn':
+            # Use the Level of returns (Stationary)
+            vals = features_aligned[col]
+            x['neg_rtn'] = np.where(vals < 0, vals, 0)
+            x['pos_rtn'] = np.where(vals > 0, vals, 0)
+        else:
+            # Diff Macro variables (Non-Stationary Yields/Spreads)
+            x[f"d_{col}"] = features_aligned[col].diff()
+
+    # 4. Final Alignment
+    # Join and drop NaNs created by the .diff() operations
+    regression_df = pd.DataFrame(y).join(x, how='inner').dropna()
+
+    y_final = regression_df[y.name]
+    x_final = regression_df.drop(columns=[y.name])
+
+    # 5. Run Regression
+    x_final = sm.add_constant(x_final)
+    model = sm.OLS(y_final, x_final)
+    results = model.fit()
+
+    #print(results.summary())
+
+    return results
+
+
+def snap_maturities_to_grid(df, tolerances):
+    """
+    tolerances = {30: 5, 45: 1, 60: 7}
+    Maps maturities to targets based on specific window sizes.
+    """
+    df_clean = df.copy()
+
+    def get_nearest(val):
+        best_target = np.nan
+        min_dist = float('inf')
+
+        # Check each target against its specific tolerance
+        for target, tol in tolerances.items():
+            dist = abs(val - target)
+            if dist <= tol:
+                # If valid, is it the closest target?
+                if dist < min_dist:
+                    min_dist = dist
+                    best_target = target
+        return best_target
+
+    # Apply mapping
+    df_clean['maturity_days'] = df_clean['maturity_days'].apply(get_nearest)
+
+    # Drop rows that didn't match any target
+    return df_clean.dropna(subset=['maturity_days'])
+
+
 
