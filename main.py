@@ -109,3 +109,51 @@ print(df_report)
 
 #################################################
 ## DIAGNOSIS
+
+mymodel = sm.OLS(y_final, x_final).fit()
+
+# plot of actual vs the predicted level
+# 2. Setup the plot
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+
+# Top Panel: Actual vs Predicted
+ax1.plot(y_final.index, y_final, label='Actual Level (30D)', color='black', alpha=0.6, linewidth=1.5)
+ax1.plot(y_final.index, mymodel.fittedvalues, label='Predicted Level', color='red', linestyle='--', alpha=0.8)
+ax1.set_title('Model Performance: 30D Volatility Level', fontsize=14)
+ax1.set_ylabel('Implied Volatility')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+# Bottom Panel: Residuals
+residuals = mymodel.resid
+ax2.bar(residuals.index, residuals, color='gray', alpha=0.5, label='Residuals', width=1.0)
+ax2.axhline(0, color='black', linewidth=1)
+ax2.set_ylabel('Error')
+ax2.set_xlabel('Date')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+## Rolling regression plot
+from statsmodels.regression.rolling import RollingOLS
+
+# 1. Define Window (e.g., 6 months = approx 126 trading days)
+window_size = 50 # Short window since your sample size is small (N=73/91)
+
+# 2. Fit Rolling Model
+# Ensure your index is a datetime index for the plot to look right
+rolling_model = RollingOLS(y_final, x_final, window=window_size)
+rolling_res = rolling_model.fit()
+
+# 3. Plot
+plt.figure(figsize=(12, 5))
+plt.plot(rolling_res.rsquared.index, rolling_res.rsquared, color='darkgreen', linewidth=2)
+plt.title(f'Rolling {window_size}-Day R-Squared (Model Stability)', fontsize=14)
+plt.ylabel('R-Squared')
+plt.axhline(0.58, color='gray', linestyle='--', label='Full Sample R2 (0.58)') # Reference line
+plt.legend()
+plt.ylim(0, 1) # R2 is between 0 and 1
+plt.grid(True)
+plt.show()
