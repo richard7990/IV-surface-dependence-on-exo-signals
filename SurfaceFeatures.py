@@ -1,9 +1,16 @@
 import numpy as np
 import pandas as pd
-import matplotlib as plt
-from Utilities import  build_mesh, eval_splined_surface, interpolated_spline
 
-def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=50, n_t=50):
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+
+from scipy.interpolate import griddata
+from Utilities import  build_mesh, eval_splined_surface, interpolated_spline, calculate_surface_errors, plot_smooth_error_surface
+
+def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=50, n_t=50, min_points=5, maturity_bin_width = 4/365):
     """
     Generates a time-series of surface features (Level, Slope, Curvature)
     from a dataset of options snapshots (e.g., weekly data).
@@ -32,15 +39,15 @@ def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=5
     print(f"Processing {len(grouped)} snapshots...")
 
     # DEBUG: Select only the group at index 1 to test
-    # observation_date, observation_data = list(grouped)[1]
+    fobservation_date, fobservation_data = list(grouped)[1]
     for observation_date, observation_data in grouped:
         try:
             # A. Build the Surface (Fit the PCHIP Splines)
             # We use the robust settings we tuned: PCHIP + Outlier Removal + Monotonicity check
             splines, meta = interpolated_spline(
                 observation_data,
-                T_bin_width=4 / 365,  # 4 days bin width is good for weekly data
-                min_points=3,
+                T_bin_width=maturity_bin_width,
+                min_points=min_points,
                 use_pchip=True,
                 smooth_window=smooth,
             )
@@ -57,7 +64,8 @@ def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=5
             # This applies the smoothing and gap-filling logic to generate the full surface
             IV_grid, T_sorted, slice_vals = eval_splined_surface(
                 splines, meta, m_grid, T_grid,
-                require_points_per_m=3
+                min_points=min_points,
+                smooth_window=smooth
             )
 
             if np.isnan(IV_grid).all():
@@ -70,6 +78,32 @@ def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=5
 
             # Add the date column so we know when this observation happened
             daily_feats['date'] = observation_date
+
+            # debug pause
+            if observation_date == fobservation_date:
+                print(f"Processed date: {observation_date.date()}")
+                with plt.style.context('dark_background'):
+                    MM, TT = np.meshgrid(m_grid, T_grid)
+
+                    # Usage:
+                    df_error = calculate_surface_errors(observation_data, splines, meta)
+                    plot_smooth_error_surface(df_error)
+
+                    fig = plt.figure(figsize=(10, 6))
+                    ax = fig.add_subplot(111, projection="3d")
+                    ax.scatter(observation_data['T'], observation_data['moneyness'], observation_data['IV'], c='red',
+                               marker='o', alpha=0.8, label='Data Points')
+                    #ax.plot_surface(TT, MM, Z, cmap="viridis")
+                    ax.plot_surface(TT, MM, IV_grid, cmap="inferno")
+                    ax.set_ylabel("Moneyness K/S")
+                    ax.set_xlabel("Maturity T (years)")
+                    # invert y and z by reversing current limits
+                    ax.set_xlim(ax.get_xlim()[::-1])
+                    ax.set_zlim(ax.get_zlim()[::-1])
+                    ax.set_zlabel("Implied Vol")
+                    # ax.set_title("Implied Volatility Surface (Calls only)")
+                    # plt.savefig('figures/SPY_call_option_IV_surface.png')
+                    plt.show()
 
             if visual:
                 # Extract the full IV curve for each target maturity for plotting
@@ -104,19 +138,46 @@ def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=5
         for target_T, curves in visual_storage.items():
             if not curves:
                 continue
+            with plt.style.context('dark_background'):
+                    fig, ax = plt.subplots(figsize=(10, 5))
 
-            plt.figure(figsize=(10, 5))
-            N_curves = len(curves)
-            for i, (d, m, iv) in enumerate(curves):
-                # Fade from light blue to dark blue over time
-                plt.plot(m, iv, color='b', alpha=(i + 1) / N_curves)
+                    N_curves = len(curves)
 
-            plt.axvline(1.0, color='r', linestyle='--', label="ATM")
-            plt.title(f"Volatility Smile Evolution: T={target_T:.3f} yrs ({target_T * 365:.3f} days)")
-            plt.xlabel("Moneyness")
-            plt.ylabel("Implied Vol")
-            plt.grid(True)
-            plt.show()
+                    # 1. Choose a colormap (e.g., 'viridis', 'plasma', 'coolwarm')
+                    cmap = plt.get_cmap('inferno')
+
+                    for i, (d, m, iv) in enumerate(curves):
+                        # 2. Calculate the fraction of time (0.0 to 1.0)
+                        fraction = i / max(N_curves - 1, 1)
+
+                        # 3. Get the specific color for this time step
+                        curve_color = cmap(fraction)
+
+                        # Plot with the dynamic color (keep alpha high to see colors clearly)
+                        ax.plot(m, iv, color=curve_color, alpha=0.8, linewidth=1.2)
+
+                    ax.axvline(1.0, color='w', linestyle='--', alpha=0.5, label="ATM")
+
+                    # 4. Create a Colorbar to act as the Legend
+                    # We create a "ScalarMappable" just to generate the colorbar
+                    norm = mcolors.Normalize(vmin=0, vmax=N_curves)
+                    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+                    sm.set_array([])
+
+                    # Add the colorbar to the plot
+                    cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+                    cbar.set_label('Time Progression (Older -> Newer)', rotation=270, labelpad=15)
+                    # Optional: Replace ticks with "Start" and "End" if you prefer
+                    cbar.set_ticks([0, N_curves])
+                    cbar.set_ticklabels(['Start Date', 'End Date'])
+
+                    ax.set_title(
+                        f"Volatility Smile Evolution: T={target_T:.3f} yrs ({target_T * 365:.1f} days)")
+                    ax.set_xlabel("Moneyness (K/S)")
+                    ax.set_ylabel("Implied Vol")
+                    ax.grid(True, alpha=0.3)
+                    plt.savefig(f"figures/SPY_{target_T * 365}_day SMILE evolution.png")
+                    plt.show()
 
     # 3. Compile into a single DataFrame
     if all_features:

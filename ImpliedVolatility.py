@@ -153,8 +153,8 @@ class ImpliedVolatility:
 
         # Calculate T
         df['T'] = (df['expiration'] - df['date']).dt.days / 365.0
-        df = df[df['T'] > 10/365] # ultra short maturities
-        df = df.groupby("T").filter(lambda x: len(x) >= 5)
+        df = df[df['T'] > 3/365] # ultra short maturities
+        df = df.groupby("T").filter(lambda x: len(x) >= 2)
 
         # Limit expiries
         if num_expiry is not None:
@@ -228,7 +228,8 @@ class ImpliedVolatility:
             ax.set_xlim(ax.get_xlim()[::-1])
             ax.set_zlim(ax.get_zlim()[::-1])
             ax.set_zlabel("Implied Vol")
-            ax.set_title("Implied Volatility Surface (Calls only)")
+            #ax.set_title("Implied Volatility Surface (Calls only)")
+            plt.savefig('figures/SPY_call_option_IV_surface.png')
             plt.show()
         return
 
@@ -245,5 +246,5 @@ class ImpliedVolatility:
 
             ax.set_xlabel("Maturity T (years)")
             ax.set_ylabel("Moneyness K/S")
-            ax.set_title("Implied Volatility Heatmap")
+            #ax.set_title("Implied Volatility Heatmap")
             plt.show()

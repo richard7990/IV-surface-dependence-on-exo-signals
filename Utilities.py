@@ -10,7 +10,7 @@ def build_mesh(c_pts, meta, n_moneyness=100, n_maturity=100):
     m_min = meta["x_min"].max()
     m_max = meta["x_max"].min()
     m_grid = np.linspace(m_min, m_max, n_moneyness)
-    T_grid = np.linspace(c_pts["T"].min() + 0.05, c_pts["T"].max(), n_maturity)
+    T_grid = np.linspace(c_pts["T"].min(), c_pts["T"].max(), n_maturity)
     return m_grid, T_grid
 
 
@@ -96,18 +96,18 @@ def interpolated_spline(
 
             # 3. Apply "minimum so far" filter (accumulated minimum)
             # If y drops to 0.33, it can never go back up to 0.34 later.
-            if len(y_right) > 0:
-                y_monotonic = np.minimum.accumulate(y_right)
-                y[atm_mask] = y_monotonic
+            # if len(y_right) > 0:
+            #     y_monotonic = np.minimum.accumulate(y_right)
+            #     y[atm_mask] = y_monotonic
 
-        # rolling median smoothing (works best after sorting)
-        if smooth_window > 1:
-            y = (
-                pd.Series(y)
-                .rolling(window=smooth_window, center=True, min_periods=1)
-                .median()
-                .to_numpy(dtype=float)
-            )
+        # # rolling median smoothing (works best after sorting)
+        # if smooth_window > 1:
+        #     y = (
+        #         pd.Series(y)
+        #         .rolling(window=smooth_window, center=True, min_periods=1)
+        #         .median()
+        #         .to_numpy(dtype=float)
+        #     )
 
         # fit interpolator
         if use_pchip:
@@ -131,12 +131,104 @@ def interpolated_spline(
     return splines, meta_df
 
 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+def calculate_surface_errors(df_raw, splines, meta_df):
+    """
+    Computes predicted IV for each point in df_raw using the fitted splines.
+    Interpolates linearly between maturity buckets.
+    """
+    df = df_raw.copy()
+    preds = []
+
+    # Sort meta to ensure we can find neighbors easily
+    sorted_meta = meta_df.sort_values('T_mid')
+    available_Ts = sorted_meta['T_mid'].values
+
+    for idx, row in df.iterrows():
+        t_obs = row['T']
+        k_obs = row['moneyness']
+
+        # 1. Find bounding splines (Time Interpolation)
+        # Find the maturity buckets just below and just above the observation
+        if t_obs <= available_Ts[0]:
+            # Extrapolation (or snap to first) - usually risky, but use first spline
+            t_left, t_right = available_Ts[0], available_Ts[0]
+        elif t_obs >= available_Ts[-1]:
+            # Extrapolation (or snap to last)
+            t_left, t_right = available_Ts[-1], available_Ts[-1]
+        else:
+            # Interpolation
+            idx_right = np.searchsorted(available_Ts, t_obs)
+            t_left = available_Ts[idx_right - 1]
+            t_right = available_Ts[idx_right]
+
+        # 2. Evaluate Splines at Moneyness K
+        try:
+            val_left = float(splines[t_left](k_obs))
+            val_right = float(splines[t_right](k_obs))
+
+            # 3. Time Interpolation
+            if t_left == t_right:
+                iv_pred = val_left
+            else:
+                # Linear weighting based on distance
+                weight = (t_obs - t_left) / (t_right - t_left)
+                iv_pred = val_left * (1 - weight) + val_right * weight
+
+        except Exception:
+            # Handle cases where moneyness is out of spline bounds
+            iv_pred = np.nan
+
+        preds.append(iv_pred)
+
+    df['Predicted_IV'] = preds
+    df['Error'] = df['IV'] - df['Predicted_IV']  # Signed Error (Bias)
+    df['Abs_Error'] = df['Error'].abs()  # Magnitude (Accuracy)
+
+    return df
+
+
+from scipy.interpolate import griddata
+
+
+def plot_smooth_error_surface(df_error):
+    # Create a grid
+    grid_x, grid_y = np.mgrid[
+        df_error['T'].min():df_error['T'].max():100j,
+        df_error['moneyness'].min():df_error['moneyness'].max():100j
+    ]
+
+    # Interpolate the ERROR values onto the grid
+    grid_z = griddata(
+        (df_error['T'], df_error['moneyness']),
+        df_error['Error'],
+        (grid_x, grid_y),
+        method='linear'  # Linear is safer for errors than cubic
+    )
+
+    plt.figure(figsize=(10, 6))
+    #plt.pcolormesh(grid_x, grid_y, grid_z, cmap='hot', shading='auto', vmin=-0.01, vmax=0.01)
+    plt.contourf(grid_x, grid_y, grid_z, levels=20, cmap='seismic', vmin=-0.01, vmax=0.01)
+    plt.colorbar(label='Error (Raw Vol Pts)')
+    plt.scatter(df_error['T'], df_error['moneyness'], c='red', s=100, label='Data Points')
+
+    plt.title('Interpolated Error Surface (Zones of Poor Fit)')
+    plt.xlabel('Maturity T')
+    plt.ylabel('Moneyness K/S')
+    plt.legend()
+    plt.show()
+
 def eval_splined_surface(
     splines: Dict[float, object],
     meta_df: pd.DataFrame,
     m_grid: np.ndarray,
     T_grid: np.ndarray,
-    require_points_per_m: int = 2,
+    min_points: int = 2,
     smooth_window: int = 4,
     clamp: Tuple[float, float] = (0.0, 5.0),
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -159,7 +251,7 @@ def eval_splined_surface(
     if missing:
         raise ValueError(f"meta_df is missing columns: {sorted(missing)}")
 
-    if require_points_per_m < 2:
+    if min_points < 2:
         raise ValueError("require_points_per_m must be >= 2")
     if smooth_window < 1:
         raise ValueError("smooth_window must be >= 1")
@@ -209,7 +301,7 @@ def eval_splined_surface(
     for j in range(m_grid.size):
         col = IV_slices[:, j]
         ok = np.isfinite(col)
-        if ok.sum() < require_points_per_m:
+        if ok.sum() < min_points:
             continue
 
         interp_col = np.interp(
@@ -221,13 +313,13 @@ def eval_splined_surface(
         )
 
         # --- 3) optional smoothing along maturity dimension
-        if smooth_window > 1:
-            interp_col = (
-                pd.Series(interp_col)
-                .rolling(window=smooth_window, center=True, min_periods=1)
-                .mean()
-                .to_numpy(dtype=float)
-            )
+        # if smooth_window > 1:
+        #     interp_col = (
+        #         pd.Series(interp_col)
+        #         .rolling(window=smooth_window, center=True, min_periods=1)
+        #         .mean()
+        #         .to_numpy(dtype=float)
+        #     )
 
         IV_grid[:, j] = interp_col
 
