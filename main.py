@@ -67,14 +67,13 @@ start_date = ts_features['date'].min()
 end_date = ts_features['date'].max()
 exo_df = get_exo_df(start_date=start_date, end_date=end_date)
 
-
 label_columns = 'level'
 feature_columns = None
 
 # 1. Setup
-maturity_dates = [30, 45, 60]
+maturity_dates = [14, 30, 45, 60]
 parameters = ['level', 'skew', 'curvature']
-tolerances = {30: 5, 45: 1, 60: 7}  # Your "Hybrid" Strategy
+tolerances = {14: 5, 30: 5, 45: 5, 60: 5}  # Your "Hybrid" Strategy
 
 # Dictionary to hold all results
 full_report_data = []

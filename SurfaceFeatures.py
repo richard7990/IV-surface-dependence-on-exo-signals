@@ -6,8 +6,6 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-
-from scipy.interpolate import griddata
 from Utilities import  build_mesh, eval_splined_surface, interpolated_spline, calculate_surface_errors, plot_smooth_error_surface
 
 def ts_surface_features(input_df, maturity_slices, visual=False, smooth=3, n_m=50, n_t=50, min_points=5, maturity_bin_width = 4/365):

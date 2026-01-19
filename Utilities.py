@@ -212,7 +212,6 @@ def plot_smooth_error_surface(df_error):
     )
 
     plt.figure(figsize=(10, 6))
-    #plt.pcolormesh(grid_x, grid_y, grid_z, cmap='hot', shading='auto', vmin=-0.01, vmax=0.01)
     plt.contourf(grid_x, grid_y, grid_z, levels=20, cmap='seismic', vmin=-0.01, vmax=0.01)
     plt.colorbar(label='Error (Raw Vol Pts)')
     plt.scatter(df_error['T'], df_error['moneyness'], c='red', s=100, label='Data Points')
@@ -329,8 +328,7 @@ def eval_splined_surface(
 
     return IV_grid, T_sorted, IV_slices
 
-
-def OLS_regression(ts_features, exo_df, target_maturity = 30, target_label = None, feature_columns = None):
+def prepare_for_OLS(ts_features, exo_df, target_maturity = 30, target_label = None, feature_columns = None):
     labels = ts_features[ts_features['maturity_days'] == target_maturity].copy()
     # filter on the target maturity
     labels = labels.set_index('date').sort_index()
@@ -369,6 +367,11 @@ def OLS_regression(ts_features, exo_df, target_maturity = 30, target_label = Non
     y_final = regression_df[y.name]
     x_final = regression_df.drop(columns=[y.name])
 
+    return y_final, x_final
+
+def OLS_regression(ts_features, exo_df, target_maturity = 30, target_label = None, feature_columns = None):
+    y_final, x_final = prepare_for_OLS(ts_features, exo_df, target_maturity, target_label, feature_columns)
+
     # 5. Run Regression
     x_final = sm.add_constant(x_final)
     model = sm.OLS(y_final, x_final)
@@ -376,7 +379,7 @@ def OLS_regression(ts_features, exo_df, target_maturity = 30, target_label = Non
 
     #print(results.summary())
 
-    return results
+    return results, model
 
 
 def snap_maturities_to_grid(df, tolerances):
